@@ -1,0 +1,9 @@
+{
+  "name": "sun-sensors",
+  "version": "1.0.0",
+  "description": "Attitude, camera geometry, location, haptics and OS time zones for SunSpotter",
+  "main": "index.ts",
+  "license": "UNLICENSED",
+  "author": "SunSpotter",
+  "homepage": "https://example.invalid"
+}
