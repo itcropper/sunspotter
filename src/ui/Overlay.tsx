@@ -90,24 +90,40 @@ function pathFromRuns(runs: number[][]): SkPath {
 }
 
 export function Overlay(props: OverlayProps) {
+  // Destructure every value referenced by a worklet into locals. Reanimated's Babel plugin
+  // captures each referenced identifier whole, so touching `props.x` inside a worklet pulls the
+  // entire props object (including `zone: LocalZone`) across the thread boundary — and class
+  // instances can't be copied by the Worklets runtime.
   const { screen, fonts } = props;
   const casingA = props.increasedContrast ? alpha.increasedContrastCasing : alpha.casingStroke;
+  const attitude = props.attitude;
+  const calibration = props.calibration;
+  const dragCalibration = props.dragCalibration;
+  const rotation = props.rotation;
+  const intrinsics = props.intrinsics;
+  const path = props.path;
+  const sun = props.sun;
+  const riseSetAlt = props.riseSetAlt;
+  const frameOut = props.frameOut;
+  const calibrating = props.calibrating;
+  const finger = props.finger;
+  const sunLookEvent = props.sunLook.event;
 
   const frame = useDerivedValue<Frame>(() => {
-    const cal = props.dragCalibration.value ?? props.calibration.value;
-    const m = viewMatrix(props.attitude.value, cal, props.rotation.value);
+    const cal = dragCalibration.value ?? calibration.value;
+    const m = viewMatrix(attitude.value, cal, rotation.value);
     const f = computeFrame(
       m,
-      props.intrinsics.value,
+      intrinsics.value,
       screen,
-      props.path.value,
-      props.sun.value,
-      props.riseSetAlt.value[0],
-      props.riseSetAlt.value[1],
+      path.value,
+      sun.value,
+      riseSetAlt.value[0],
+      riseSetAlt.value[1],
       stroke.dash[0],
       stroke.dash[1],
     );
-    props.frameOut.value = f.sunCenter;
+    frameOut.value = f.sunCenter;
     return f;
   });
 
@@ -138,9 +154,9 @@ export function Overlay(props: OverlayProps) {
     }
   }, [props.sunLook.event, pulse]);
   const eventR = useDerivedValue(() => (size.sun.ring + (size.sun.eventRing - size.sun.ring) * pulse.value) / 2);
-  const eventOpacity = useDerivedValue(() => (props.sunLook.event ? 1 - (1 - alpha.eventRing) * pulse.value : 0));
-  const notCalibrating = useDerivedValue(() => (props.calibrating.value ? 0 : 1));
-  const isCalibrating = useDerivedValue(() => (props.calibrating.value ? 1 : 0));
+  const eventOpacity = useDerivedValue(() => (sunLookEvent ? 1 - (1 - alpha.eventRing) * pulse.value : 0));
+  const notCalibrating = useDerivedValue(() => (calibrating.value ? 0 : 1));
+  const isCalibrating = useDerivedValue(() => (calibrating.value ? 1 : 0));
 
   // Labels: built on JS when the date or format changes.
   const hourLabels = useMemo<Label[]>(
@@ -174,8 +190,8 @@ export function Overlay(props: OverlayProps) {
   const ringColor = props.sunLook.ring;
   const sunTransform = useDerivedValue(() => [{ translateX: sunX.value }, { translateY: sunY.value }]);
   const liftTransform = useDerivedValue(() => [
-    { translateX: props.finger.value.x },
-    { translateY: props.finger.value.y - 56 },
+    { translateX: finger.value.x },
+    { translateY: finger.value.y - 56 },
   ]);
   const opacity = props.visible ? (props.dimmed ? alpha.compassDim : 1) : 0;
 

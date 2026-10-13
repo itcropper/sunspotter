@@ -16,6 +16,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
 import android.view.Surface
@@ -271,16 +274,74 @@ class SunSensorsModule : Module(), SensorEventListener, LocationListener {
     }
   }
 
-  /** Spec-Interactions mapping. CONFIRM/REJECT need API 30; below that use VIRTUAL_KEY / LONG_PRESS. */
+  /**
+   * Spec-Interactions mapping. CONFIRM/REJECT/SEGMENT_FREQUENT_TICK need API 30; below that use
+   * VIRTUAL_KEY / LONG_PRESS / KEYBOARD_TAP.
+   *
+   * Two paths run on every call:
+   *   1. `view.performHapticFeedback` — the preferred, context-aware API. Uses `SEGMENT_FREQUENT_TICK`
+   *      on API 30+ (designed for dials/sliders). `FLAG_IGNORE_VIEW_SETTING` keeps it firing even
+   *      when the host view hasn't opted into haptics.
+   *   2. `Vibrator.vibrate(VibrationEffect)` — direct hardware trigger as a backstop for devices
+   *      where `performHapticFeedback` is silent (some skins mute it when "Touch feedback" is off
+   *      in system settings). Strength/duration are tuned per kind for a subtle but perceptible
+   *      tick on the dial and firmer bumps for medium/success/warning.
+   *
+   * Requires `android.permission.VIBRATE` (already declared in the manifest).
+   */
   private fun haptic(kind: String) {
-    val view = appContext.currentActivity?.window?.decorView ?: return
+    val view = appContext.currentActivity?.window?.decorView
     val constant = when (kind) {
-      "light" -> HapticFeedbackConstants.CLOCK_TICK
+      "light" -> if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.SEGMENT_FREQUENT_TICK else HapticFeedbackConstants.KEYBOARD_TAP
       "medium" -> HapticFeedbackConstants.CONTEXT_CLICK
       "success" -> if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY
       "warning" -> if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
       else -> return
     }
-    view.post { view.performHapticFeedback(constant) }
+    view?.post {
+      view.performHapticFeedback(constant, HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING)
+    }
+    vibrateFallback(kind)
+  }
+
+  private fun vibrateFallback(kind: String) {
+    try {
+      val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= 31) {
+        (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+      } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+      }
+      if (vibrator?.hasVibrator() != true) return
+      // Prefer the vendor-tuned predefined effects when available (API 29+). They're specifically
+      // designed for frequent dial/slider ticks and the system handles rapid-fire gracefully —
+      // whereas `createOneShot` with sub-30 ms durations gets clobbered by the next call before
+      // the voice coil fully engages, which is why the dial ticks produced *log output* but no
+      // perceptible buzz.
+      val effect: VibrationEffect = if (Build.VERSION.SDK_INT >= 29) {
+        val predefined = when (kind) {
+          "light" -> VibrationEffect.EFFECT_TICK
+          "medium" -> VibrationEffect.EFFECT_CLICK
+          "success" -> VibrationEffect.EFFECT_HEAVY_CLICK
+          "warning" -> VibrationEffect.EFFECT_DOUBLE_CLICK
+          else -> return
+        }
+        VibrationEffect.createPredefined(predefined)
+      } else {
+        val duration: Long
+        val strength: Int
+        when (kind) {
+          "light" -> { duration = 22L; strength = 180 }
+          "medium" -> { duration = 35L; strength = 220 }
+          "success" -> { duration = 50L; strength = 250 }
+          "warning" -> { duration = 70L; strength = 255 }
+          else -> return
+        }
+        VibrationEffect.createOneShot(duration, strength)
+      }
+      vibrator.vibrate(effect)
+    } catch (e: Exception) {
+      android.util.Log.w("SunSensors", "haptic failed", e)
+    }
   }
 }

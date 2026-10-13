@@ -18,7 +18,7 @@ const SYDNEY: Place = { latitude: -33.8688, longitude: 151.2093 };
 const QUITO: Place = { latitude: -0.1807, longitude: -78.4678 };
 
 function zoneAt(p: Place) {
-  return new LocalZone(zoneForLocation(p.latitude, p.longitude), intlOffsetProvider);
+  return LocalZone(zoneForLocation(p.latitude, p.longitude), intlOffsetProvider);
 }
 
 function dayEvents(p: Place, y: number, m: number, d: number) {

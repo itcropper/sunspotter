@@ -4,7 +4,7 @@ import { LocalZone, intlOffsetProvider } from '../../src/core/timezone';
 import { MOCK_NOW_MS } from '../../src/core/constants';
 
 export function a11yLabelsForAllElements(): [string, string][] {
-  const z = new LocalZone('America/Los_Angeles', intlOffsetProvider);
+  const z = LocalZone('America/Los_Angeles', intlOffsetProvider);
   const now = MOCK_NOW_MS;
   return [
     ['Camera view + overlay', labels.summary({ live: true, t: now, altitude: 8.4, azimuth: 251.5, rise: null, set: now + 3000000, golden: [now + 840000, now + 4140000] }, z, '12')],

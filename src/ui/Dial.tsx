@@ -1,4 +1,23 @@
 // Thumb dial (C-Dial): time, day and month rings anchored to the bottom corner on the dial side.
+//
+// UX model
+// --------
+// Each ring behaves like an iOS/Google picker. Numbers slide smoothly through the arc as the
+// user drags/decays and are *always rendered upright* — never tilted — because each label is a
+// standalone paragraph whose (x, y) is a UI-thread worklet; it has no rotating parent.
+//
+// Position math (purely UI-thread, no React state in the hot path)
+// ----------------------------------------------------------------
+// `scrubBase*` is a snapshot of the value under the notch at the moment the gesture started
+// (set by `beginScrub` in MainScreen). It stays constant for the whole gesture, so each label's
+// `baseAngle` is a render-time constant:
+//
+//     baseAngle = 45° + offset · DEG_PER_UNIT        (offset is the integer step from scrubBase)
+//     angle     = baseAngle + drag.value             (drag.value changes continuously via withDecay/withSpring)
+//
+// The committed `selected` on JS updates lazily via `applyRing`; the center readout follows it.
+// Positions never depend on `selected`, which is why label flow stays smooth across step crossings
+// even when React is behind.
 import {
   Canvas,
   Circle,
@@ -18,7 +37,7 @@ import type { LocalZone } from '../core/timezone';
 import { alpha, color, size, stroke, type, withAlpha } from '../theme/tokens';
 import type { Layout, Ring } from './geometry';
 import { polar } from './geometry';
-import { makeLabel } from './text';
+import { makeLabel, type Label } from './text';
 
 export type DialProps = {
   layout: Layout;
@@ -30,16 +49,29 @@ export type DialProps = {
   timeFormat: '12' | '24';
   goldenSpans: [number, number][];
   blueSpans: [number, number][];
-  /** Ring being dragged, if any. */
   active: Ring | null;
-  /** Fractional drag angle (deg) for the active ring; ghost ticks trail 3° behind while moving. */
+  /** Raw rotation (deg) accumulated by the current gesture; UI thread. */
   drag: SharedValue<number>;
+  /** Pool anchors: snapshotted at gesture start, stable throughout the gesture. */
+  scrubBaseTime: number;
+  scrubBaseDay: number;
+  scrubBaseMonth: number;
   moving: boolean;
   disabled: boolean;
   increasedContrast: boolean;
 };
 
-const D = size.dial;
+const WEDGE_MIN = 0;
+const WEDGE_MAX = 90;
+const WEDGE_FADE = 6;
+// Pool sizes — each capped under the one-revolution overlap limit for its ring:
+//   time:  17 labels @ 15 min = ±2 h of coverage (per-label spacing 21°)
+//   day:   19 labels @ 1 day  stays under the 360° / 18° = 20 overlap boundary
+//   month: 12 labels @ 1 month covers exactly 360° at 30°/mo (no overlap possible)
+const TIME_LABELS_PER_SIDE = 8;
+const DAY_LABELS_PER_SIDE = 9;
+const MONTH_LABELS_PER_SIDE = 6;
+const TIME_STEP_MS = 15 * 60000;
 
 function arcPath(l: Layout, r: number, from: number, to: number) {
   const p = Skia.Path.Make();
@@ -75,72 +107,109 @@ function minuteColor(t: number, zone: LocalZone, golden: [number, number][], blu
 }
 
 export function Dial(p: DialProps) {
-  const { layout: l, fonts, zone, selected, now, live, timeFormat } = p;
-  const sel = D.selectionDeg;
+  // Destructure into locals so no worklet captures `p` whole (LocalZone can't cross threads).
+  const {
+    layout: l,
+    fonts,
+    zone,
+    selected,
+    now,
+    live,
+    timeFormat,
+    active,
+    drag,
+    scrubBaseTime,
+    scrubBaseDay,
+    scrubBaseMonth,
+    moving,
+  } = p;
+  const sel = l.dial.selectionDeg;
   const ringFill = p.increasedContrast ? alpha.increasedContrastRing : alpha.surfaceChip;
 
   const fill = (ring: Ring) =>
     p.active === ring ? alpha.dialActiveFill : p.active ? alpha.dialInactiveFill : ringFill;
   const border = (ring: Ring) =>
     p.active === ring ? alpha.dialActiveBorder : p.active ? alpha.dialInactiveBorder : alpha.ringBorder;
-  const readoutAlpha = (ring: Ring) => (p.active && p.active !== ring ? alpha.dialInactiveReadout : 1);
 
   const bands = useMemo(
     () => ({
-      time: bandPath(l, D.time[0], D.time[1]),
-      day: bandPath(l, D.day[0], D.day[1]),
-      month: bandPath(l, D.month[0], D.month[1]),
-      wedge: bandPath(l, D.month[0], D.time[1], D.wedgeDeg[0], D.wedgeDeg[1]),
-      notch: (() => {
-        const tip = polar(l, D.notch[0], sel);
-        const a = polar(l, D.notch[1], sel - D.notchWidthDeg / 2);
-        const b = polar(l, D.notch[1], sel + D.notchWidthDeg / 2);
-        const path = Skia.Path.Make();
-        path.moveTo(tip.x, tip.y);
-        path.lineTo(a.x, a.y);
-        path.lineTo(b.x, b.y);
-        path.close();
-        return path;
-      })(),
+      time: bandPath(l, l.dial.time[0], l.dial.time[1]),
+      day: bandPath(l, l.dial.day[0], l.dial.day[1]),
+      month: bandPath(l, l.dial.month[0], l.dial.month[1]),
+      wedge: bandPath(l, l.dial.month[0], l.dial.time[1], l.dial.wedgeDeg[0], l.dial.wedgeDeg[1]),
     }),
-    [l, sel],
+    [l],
   );
 
-  const selMinute = Math.floor(selected / 60000) * 60000;
-  // Minute at angle θ on the time ring: θ = 45 + 1.4·Δ (later toward the bottom-left end).
-  const minuteAt = (theta: number) => selMinute + Math.round((theta - sel) / DIAL_DEG_PER_MINUTE) * 60000;
-  const angleOf = (t: number) => sel + ((t - selMinute) / 60000) * DIAL_DEG_PER_MINUTE;
+  const f = zone.fields(selected);
 
+  // Per-ring effective drag: only the active ring moves, inactive rings stay at rest.
+  const timeDrag = useDerivedValue(() => (active === 'time' ? drag.value : 0));
+  const dayDrag = useDerivedValue(() => (active === 'day' ? drag.value : 0));
+  const monthDrag = useDerivedValue(() => (active === 'month' ? drag.value : 0));
+
+  // --- Time ring --------------------------------------------------------------------------------
+  // Pool is anchored on the nearest 5-min boundary around scrubBaseTime so every displayed time
+  // ends in a clean round number (:00, :05, :10, …) rather than an arbitrary offset from "now".
+  // The anchor stays constant for the whole gesture, so each label's baseAngle is a render-time
+  // constant that depends only on its integer offset from the anchor. Ticks and the AM/PM inner
+  // track are generated across the full ±168° drag coverage so the pattern is continuous all the
+  // way around the visible wedge no matter how fast the ring spins.
+  const timeAnchor = Math.round(scrubBaseTime / (5 * 60000)) * 5 * 60000;
   const timeRing = useMemo(() => {
+    // How many degrees the ring content shifts off center at rest, because the pool is centered
+    // on the nearest 5-min boundary rather than on scrubBaseTime exactly.
+    const anchorOffsetDeg = ((timeAnchor - scrubBaseTime) / 60000) * DIAL_DEG_PER_MINUTE;
+    // Tick path: minor every 5 min, major every 15 min, covering ±120 min relative to the anchor.
     const ticks = Skia.Path.Make();
-    const labels: { x: number; y: number; t: number }[] = [];
-    const startMin = minuteAt(-2);
-    for (let t = startMin - 5 * 60000; t <= minuteAt(92) + 5 * 60000; t += 60000) {
-      const f = zone.fields(t);
-      if (f.minute % 5 !== 0) continue;
-      const th = angleOf(t);
-      if (th < 0 || th > 90) continue;
-      const major = f.minute % 15 === 0;
-      const r0 = major ? D.tickMajor[0] : D.tickMinor[0];
-      const a = polar(l, r0, th);
-      const b = polar(l, D.tickMinor[1], th);
+    for (let o = -120; o <= 120; o += 5) {
+      const t = timeAnchor + o * 60000;
+      const ff = zone.fields(t);
+      if (ff.minute % 5 !== 0) continue;
+      const major = ff.minute % 15 === 0;
+      const base = sel + anchorOffsetDeg + o * DIAL_DEG_PER_MINUTE;
+      const r0 = major ? l.dial.tickMajor[0] : l.dial.tickMinor[0];
+      const a = polar(l, r0, base);
+      const b = polar(l, l.dial.tickMinor[1], base);
       ticks.moveTo(a.x, a.y);
       ticks.lineTo(b.x, b.y);
-      if (major && Math.abs(th - sel) > D.labelHideDeg) labels.push({ ...polar(l, D.labelTime, th), t });
     }
-    // Inner track (AM mint / PM peach) with a cream tick at each 12:00; outer track golden/blue.
+    // 15-min labels at anchor + i·15 min for i ∈ [-TIME_LABELS_PER_SIDE, +TIME_LABELS_PER_SIDE].
+    const labels: { offset: number; label: Label; baseAngle: number }[] = [];
+    for (let i = -TIME_LABELS_PER_SIDE; i <= TIME_LABELS_PER_SIDE; i++) {
+      const t = timeAnchor + i * TIME_STEP_MS;
+      const ff = zone.fields(t);
+      const c = minuteColor(t, zone, p.goldenSpans, p.blueSpans);
+      labels.push({
+        offset: i,
+        baseAngle: sel + anchorOffsetDeg + i * 15 * DIAL_DEG_PER_MINUTE, // 15 min · 1.4°/min = 21°
+        label: makeLabel(fonts, formatClock(ff.hour, ff.minute, timeFormat), {
+          size: type.dialLabel.size,
+          weight: 500,
+          color: c,
+          opacity: 1,
+          casing: false,
+        }),
+      });
+    }
+    // AM/PM inner track and the noon tick: cover the full ±168° drag range (same as ticks), so
+    // the color pattern fills the band even during a long momentum spin.
     const inner: { path: ReturnType<typeof Skia.Path.Make>; c: string }[] = [];
-    const outer: { path: ReturnType<typeof Skia.Path.Make>; c: string }[] = [];
     const noonTicks = Skia.Path.Make();
-    let runStart = 0;
-    let runPm = zone.fields(minuteAt(0)).hour >= 12;
-    for (let th = 0; th <= 90; th += 0.7) {
-      const pm = zone.fields(minuteAt(th)).hour >= 12;
-      if (pm !== runPm || th + 0.7 > 90) {
-        inner.push({ path: arcPath(l, D.trackInner, runStart, th), c: runPm ? color.pm : color.am });
-        if (pm !== runPm && zone.fields(minuteAt(th)).hour === 12) {
-          const a = polar(l, D.trackInner - 6, th);
-          const b = polar(l, D.trackInner + 6, th);
+    const minuteAtAnchorRest = (theta: number) =>
+      timeAnchor + Math.round((theta - sel - anchorOffsetDeg) / DIAL_DEG_PER_MINUTE) * 60000;
+    const INNER_FROM = sel - 168;
+    const INNER_TO = sel + 168;
+    const INNER_STEP = 0.7;
+    let runStart = INNER_FROM;
+    let runPm = zone.fields(minuteAtAnchorRest(INNER_FROM)).hour >= 12;
+    for (let th = INNER_FROM; th <= INNER_TO; th += INNER_STEP) {
+      const pm = zone.fields(minuteAtAnchorRest(th)).hour >= 12;
+      if (pm !== runPm || th + INNER_STEP > INNER_TO) {
+        inner.push({ path: arcPath(l, l.dial.trackInner, runStart, th), c: runPm ? color.pm : color.am });
+        if (pm !== runPm && zone.fields(minuteAtAnchorRest(th)).hour === 12) {
+          const a = polar(l, l.dial.trackInner - 6, th);
+          const b = polar(l, l.dial.trackInner + 6, th);
           noonTicks.moveTo(a.x, a.y);
           noonTicks.lineTo(b.x, b.y);
         }
@@ -148,141 +217,197 @@ export function Dial(p: DialProps) {
         runPm = pm;
       }
     }
+    // Golden/blue outer track: fixed solar events, drawn at rest coordinates (not rotated).
+    const outer: { path: ReturnType<typeof Skia.Path.Make>; c: string }[] = [];
+    const angleAtRest = (t: number) => sel + ((t - selected) / 60000) * DIAL_DEG_PER_MINUTE;
     const span = (spans: [number, number][], c: string) => {
       for (const [a, b] of spans) {
-        const ta = Math.max(0, angleOf(a));
-        const tb = Math.min(90, angleOf(b));
-        if (tb > ta) outer.push({ path: arcPath(l, D.trackOuter, ta, tb), c });
+        const ta = Math.max(0, angleAtRest(a));
+        const tb = Math.min(90, angleAtRest(b));
+        if (tb > ta) outer.push({ path: arcPath(l, l.dial.trackOuter, ta, tb), c });
       }
     };
     span(p.goldenSpans, color.golden);
     span(p.blueSpans, color.blue);
     return { ticks, labels, inner, outer, noonTicks };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [l, selMinute, zone, p.goldenSpans, p.blueSpans]);
+  }, [l, timeAnchor, scrubBaseTime, selected, zone, timeFormat, fonts, p.goldenSpans, p.blueSpans]);
 
-  const f = zone.fields(selected);
-  const labels = useMemo(() => {
-    const mk = (text: string, size: number, weight: 500 | 700, c: string, op = 1) =>
-      makeLabel(fonts, text, { size, weight, color: c, opacity: op, casing: false });
-    const timeColor = minuteColor(selMinute, zone, p.goldenSpans, p.blueSpans);
-    const days = daysInMonth(f.year, f.month);
-    const dayN = (d: number) => ((((f.day - 1 + d) % days) + days) % days) + 1;
-    const monN = (d: number) => ((((f.month - 1 + d) % 12) + 12) % 12) + 1;
-    return {
-      time: mk(formatClock(f.hour, f.minute, timeFormat), p.active === 'time' ? type.dialTime.sizeActive : type.dialTime.size, 700, timeColor, readoutAlpha('time')),
-      day: mk(String(f.day), type.dialDay.size, 700, color.white, readoutAlpha('day')),
-      month: mk(String(f.month), type.dialMonth.size, 700, color.white, readoutAlpha('month')),
-      dayNeighbors: [-2, -1, 1, 2].map((d) => ({ d, l: mk(String(dayN(d)), type.dialLabel.size, 500, color.ui, alpha.dialNeighbor) })),
-      monthNeighbors: [-1, 1].map((d) => ({ d, l: mk(String(monN(d)), type.dialLabel.size, 500, color.ui, alpha.dialNeighbor) })),
-      timeLabels: timeRing.labels.map((x) => {
-        const ff = zone.fields(x.t);
-        const c = minuteColor(x.t, zone, p.goldenSpans, p.blueSpans);
-        return { ...x, l: mk(formatClock(ff.hour, ff.minute, timeFormat), type.dialLabel.size, 500, c, c === color.golden ? 1 : alpha.dialNeighbor) };
-      }),
-    };
+  // --- Day ring ---------------------------------------------------------------------------------
+  // Pool: ±9 integer-day offsets from the anchor. Each label's text is the modular day of the
+  // month, so wrapping past the end just loops to day 1 without an angle collision.
+  const monthDays = daysInMonth(f.year, f.month);
+  const dayRing = useMemo(() => {
+    const labels: { offset: number; label: Label; baseAngle: number }[] = [];
+    for (let i = -DAY_LABELS_PER_SIDE; i <= DAY_LABELS_PER_SIDE; i++) {
+      const dayNumber = (((scrubBaseDay + i - 1) % monthDays) + monthDays) % monthDays + 1;
+      labels.push({
+        offset: i,
+        baseAngle: sel + i * DIAL_DEG_PER_DAY,
+        label: makeLabel(fonts, String(dayNumber), {
+          size: type.dialLabel.size,
+          weight: 500,
+          color: color.ui,
+          opacity: alpha.dialNeighbor,
+          casing: false,
+        }),
+      });
+    }
+    return labels;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fonts, selMinute, timeFormat, p.active, timeRing, zone, p.goldenSpans, p.blueSpans]);
+  }, [fonts, scrubBaseDay, monthDays]);
 
-  const place = (lab: { width: number; height: number }, pt: { x: number; y: number }) => ({
-    x: pt.x - lab.width / 2,
-    y: pt.y - lab.height / 2,
-  });
+  // --- Month ring -------------------------------------------------------------------------------
+  // Full 12-month wheel. 12 × 30° = 360° exactly, so pool size matches a revolution.
+  const monthRing = useMemo(() => {
+    const labels: { offset: number; label: Label; baseAngle: number }[] = [];
+    for (let i = -MONTH_LABELS_PER_SIDE; i <= MONTH_LABELS_PER_SIDE - 1; i++) {
+      const m = (((scrubBaseMonth + i - 1) % 12) + 12) % 12 + 1;
+      labels.push({
+        offset: i,
+        baseAngle: sel + i * DIAL_DEG_PER_MONTH,
+        label: makeLabel(fonts, String(m), {
+          size: type.dialLabel.size,
+          weight: 500,
+          color: color.ui,
+          opacity: alpha.dialNeighbor,
+          casing: false,
+        }),
+      });
+    }
+    return labels;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fonts, scrubBaseMonth]);
 
-  // Now marker: red notch when live, else a red tick on the ring (±32 min) or a pip past the end.
-  const nowTheta = angleOf(Math.floor(now / 60000) * 60000);
+  // --- Center readouts ---------------------------------------------------------------------------
+  // The big number in the middle of each ring is the committed `selected`. It updates on each
+  // React render (lagged a few ms behind the UI thread, which is fine for a readout). The pool
+  // label at offset 0 of the active ring is hidden to avoid double-stacking.
+  const selMinute = Math.floor(selected / 60000) * 60000;
+
+  // Group transforms for the TICKS — rotate directly by the per-ring drag (ticks are lines, so
+  // rotation does the right thing). Labels are positioned individually below.
+  const timeTicksTransform = useDerivedValue(() => [
+    { translateX: l.ax },
+    { translateY: l.ay },
+    { rotate: (-l.dir * timeDrag.value * Math.PI) / 180 },
+    { translateX: -l.ax },
+    { translateY: -l.ay },
+  ]);
+  const ghostTicksTransform = useDerivedValue(() => [
+    { translateX: l.ax },
+    { translateY: l.ay },
+    { rotate: (-l.dir * (timeDrag.value - (moving ? l.dial.ghostOffsetDeg : 0)) * Math.PI) / 180 },
+    { translateX: -l.ax },
+    { translateY: -l.ay },
+  ]);
+
+  // Now marker on the time ring.
+  const nowTheta = sel + ((Math.floor(now / 60000) * 60000 - selMinute) / 60000) * DIAL_DEG_PER_MINUTE;
   const nowOnRing = !live && Math.abs(now - selected) <= DIAL_NOW_TICK_WINDOW_MIN * 60000;
   const nowLater = now > selected;
-
-  const timeOffset = useDerivedValue(() => [
-    { translateX: l.ax },
-    { translateY: l.ay },
-    { rotate: (-l.dir * (p.active === 'time' ? p.drag.value : 0) * Math.PI) / 180 },
-    { translateX: -l.ax },
-    { translateY: -l.ay },
-  ]);
-  const ghost = useDerivedValue(() => [
-    { translateX: l.ax },
-    { translateY: l.ay },
-    { rotate: (-l.dir * ((p.active === 'time' ? p.drag.value : 0) - (p.moving ? D.ghostOffsetDeg : 0)) * Math.PI) / 180 },
-    { translateX: -l.ax },
-    { translateY: -l.ay },
-  ]);
-  const ringRotate = (ring: Ring) =>
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useDerivedValue(() => [
-      { translateX: l.ax },
-      { translateY: l.ay },
-      { rotate: (-l.dir * (p.active === ring ? p.drag.value : 0) * Math.PI) / 180 },
-      { translateX: -l.ax },
-      { translateY: -l.ay },
-    ]);
-  const dayRotate = ringRotate('day');
-  const monthRotate = ringRotate('month');
-  void DIAL_DEG_PER_DAY;
-  void DIAL_DEG_PER_MONTH;
-
-  const ring = (key: Ring) => (
-    <Group key={key}>
-      <Path path={bands[key]} color={withAlpha(color.bg, fill(key))} />
-      <Path path={bands[key]} style="stroke" strokeWidth={1} color={withAlpha(color.white, border(key))} />
-    </Group>
-  );
 
   return (
     <Canvas style={{ position: 'absolute', left: 0, top: 0, width: l.width, height: l.height }} pointerEvents="none">
       <Group opacity={p.disabled ? alpha.dialDisabled : 1}>
-        {ring('time')}
-        {ring('day')}
-        {ring('month')}
-        {!p.active && <Path path={bands.wedge} color={withAlpha(color.white, alpha.ringWedge)} />}
-        {timeRing.inner.map((s, i) => (
-          <Path key={`in${i}`} path={s.path} style="stroke" strokeWidth={stroke.dialTrack} color={withAlpha(s.c, alpha.innerTrack)} />
-        ))}
-        <Path path={timeRing.noonTicks} style="stroke" strokeWidth={stroke.tickWidth} color={color.ui} />
-        {p.moving && p.active === 'time' && (
-          <Group transform={ghost}>
-            <Path path={timeRing.ticks} style="stroke" strokeWidth={stroke.dialTick} strokeCap="round" color={withAlpha(color.ui, alpha.ghostTicks)} />
-          </Group>
-        )}
-        <Group transform={timeOffset}>
-          <Path path={timeRing.ticks} style="stroke" strokeWidth={stroke.dialTick} strokeCap="round" color={withAlpha(color.ui, p.active === 'time' ? 1 : alpha.dialTick)} />
-          {labels.timeLabels.map((x, i) => (
-            <Paragraph key={`tl${i}`} paragraph={x.l.fill} {...place(x.l, x)} width={1000} />
-          ))}
+        {/* Band fills + borders */}
+        <Group>
+          <Path path={bands.time} color={withAlpha(color.bg, fill('time'))} />
+          <Path path={bands.time} style="stroke" strokeWidth={1} color={withAlpha(color.white, border('time'))} />
         </Group>
+        <Group>
+          <Path path={bands.day} color={withAlpha(color.bg, fill('day'))} />
+          <Path path={bands.day} style="stroke" strokeWidth={1} color={withAlpha(color.white, border('day'))} />
+        </Group>
+        <Group>
+          <Path path={bands.month} color={withAlpha(color.bg, fill('month'))} />
+          <Path path={bands.month} style="stroke" strokeWidth={1} color={withAlpha(color.white, border('month'))} />
+        </Group>
+        {/* Selection highlight wedge: always visible so the user can see where "selected" is even
+            while the ring is spinning (the old `!p.active` guard made this flicker during gestures). */}
+        <Path path={bands.wedge} color={withAlpha(color.white, alpha.ringWedge)} />
+
+        {/* AM/PM inner track and ticks: rotate with time drag via the group transform. */}
+        <Group clip={bands.time}>
+          <Group transform={timeTicksTransform}>
+            {timeRing.inner.map((s, i) => (
+              <Path key={`in${i}`} path={s.path} style="stroke" strokeWidth={stroke.dialTrack} color={withAlpha(s.c, alpha.innerTrack)} />
+            ))}
+            <Path path={timeRing.noonTicks} style="stroke" strokeWidth={stroke.tickWidth} color={color.ui} />
+            {moving && active === 'time' && (
+              <Group transform={ghostTicksTransform}>
+                <Path path={timeRing.ticks} style="stroke" strokeWidth={stroke.dialTick} strokeCap="round" color={withAlpha(color.ui, alpha.ghostTicks)} />
+              </Group>
+            )}
+            <Path path={timeRing.ticks} style="stroke" strokeWidth={stroke.dialTick} strokeCap="round" color={withAlpha(color.ui, active === 'time' ? 1 : alpha.dialTick)} />
+          </Group>
+        </Group>
+
+        {/* Golden/blue outer track: positioned at rest, not rotating. */}
         {timeRing.outer.map((s, i) => (
           <Path key={`out${i}`} path={s.path} style="stroke" strokeWidth={stroke.dialTrack} color={s.c} />
         ))}
-        <Group transform={dayRotate}>
-          {labels.dayNeighbors.map(({ d, l: lab }) => (
-            <Paragraph key={`d${d}`} paragraph={lab.fill} {...place(lab, polar(l, D.labelDay, sel + d * DIAL_DEG_PER_DAY))} width={1000} />
+
+        {/* Per-ring labels — standalone paragraphs, no parent transform, always upright. */}
+        <Group clip={bands.time}>
+          {timeRing.labels.map((lab) => (
+            <RingLabel
+              key={`tl${lab.offset}`}
+              l={l}
+              label={lab.label}
+              radius={l.dial.labelTime}
+              baseAngle={lab.baseAngle}
+              drag={timeDrag}
+              hideAtNotch={false}
+            />
           ))}
         </Group>
-        <Group transform={monthRotate}>
-          {labels.monthNeighbors.map(({ d, l: lab }) => (
-            <Paragraph key={`m${d}`} paragraph={lab.fill} {...place(lab, polar(l, D.labelMonth, sel + d * DIAL_DEG_PER_MONTH))} width={1000} />
+        <Group clip={bands.day}>
+          {dayRing.map((lab) => (
+            <RingLabel
+              key={`d${lab.offset}`}
+              l={l}
+              label={lab.label}
+              radius={l.dial.labelDay}
+              baseAngle={lab.baseAngle}
+              drag={dayDrag}
+              hideAtNotch={false}
+            />
           ))}
         </Group>
-        <Paragraph paragraph={labels.time.fill} {...place(labels.time, polar(l, D.labelTime, sel))} width={1000} />
-        <Paragraph paragraph={labels.day.fill} {...place(labels.day, polar(l, D.labelDay, sel))} width={1000} />
-        <Paragraph paragraph={labels.month.fill} {...place(labels.month, polar(l, D.labelMonth, sel))} width={1000} />
-        <Path path={bands.notch} color={live ? color.now : color.ui} />
-        <Path path={bands.notch} style="stroke" strokeWidth={1.5} strokeJoin="round" color={color.bg} />
+        <Group clip={bands.month}>
+          {monthRing.map((lab) => (
+            <RingLabel
+              key={`m${lab.offset}`}
+              l={l}
+              label={lab.label}
+              radius={l.dial.labelMonth}
+              baseAngle={lab.baseAngle}
+              drag={monthDrag}
+              hideAtNotch={false}
+            />
+          ))}
+        </Group>
+
+        {/* The big enlarged readouts and the pointed notch triangle used to live here. They were
+            removed because the wheel label at the notch position already shows the selected value
+            (now that `hideAtNotch=false` keeps it visible) and the highlighted wedge marks the
+            selection point clearly on its own. */}
+
         {nowOnRing && nowTheta >= 0 && nowTheta <= 90 && (
           <Group>
             {(() => {
-              const a = polar(l, D.nowTick[0], nowTheta);
-              const b = polar(l, D.nowTick[1], nowTheta);
+              const a = polar(l, l.dial.nowTick[0], nowTheta);
+              const b = polar(l, l.dial.nowTick[1], nowTheta);
               const path = Skia.Path.Make();
               path.moveTo(a.x, a.y);
               path.lineTo(b.x, b.y);
-              const dot = polar(l, D.nowDotR, nowTheta);
+              const dot = polar(l, l.dial.nowDotR, nowTheta);
               return (
                 <>
                   <Path path={path} style="stroke" strokeWidth={stroke.nowTick} strokeCap="round" color={color.now} />
-                  <Circle cx={dot.x} cy={dot.y} r={D.nowDot / 2} color={color.now} />
-                  <Circle cx={dot.x} cy={dot.y} r={D.nowDot / 2} style="stroke" strokeWidth={1.5} color={color.bg} />
+                  <Circle cx={dot.x} cy={dot.y} r={l.dial.nowDot / 2} color={color.now} />
+                  <Circle cx={dot.x} cy={dot.y} r={l.dial.nowDot / 2} style="stroke" strokeWidth={1.5} color={color.bg} />
                 </>
               );
             })()}
@@ -296,32 +421,68 @@ export function Dial(p: DialProps) {
   );
 }
 
+/**
+ * One dial label. Position and opacity are driven purely by the ring's `drag` SharedValue on the
+ * UI thread — no React state in the hot path, no parent transform. The label stays upright at
+ * every rotation; `hideAtNotch` suppresses the pool's center-offset label while that ring is
+ * active, so it doesn't double up with the big center readout.
+ */
+function RingLabel({
+  l,
+  label,
+  radius,
+  baseAngle,
+  drag,
+  hideAtNotch,
+}: {
+  l: Layout;
+  label: Label;
+  radius: number;
+  baseAngle: number;
+  drag: SharedValue<number>;
+  hideAtNotch: boolean;
+}) {
+  const halfW = label.width / 2;
+  const halfH = label.height / 2;
+  const x = useDerivedValue(() => {
+    const angle = baseAngle + drag.value;
+    return polar(l, radius, angle).x - halfW;
+  });
+  const y = useDerivedValue(() => {
+    const angle = baseAngle + drag.value;
+    return polar(l, radius, angle).y - halfH;
+  });
+  const op = useDerivedValue(() => {
+    const angle = baseAngle + drag.value;
+    if (angle < WEDGE_MIN - WEDGE_FADE || angle > WEDGE_MAX + WEDGE_FADE) return 0;
+    let a: number;
+    if (angle < WEDGE_MIN + WEDGE_FADE) a = (angle - (WEDGE_MIN - WEDGE_FADE)) / (2 * WEDGE_FADE);
+    else if (angle > WEDGE_MAX - WEDGE_FADE) a = ((WEDGE_MAX + WEDGE_FADE) - angle) / (2 * WEDGE_FADE);
+    else a = 1;
+    return hideAtNotch ? 0 : a;
+  });
+  return (
+    <Group opacity={op}>
+      <Paragraph paragraph={label.fill} x={x} y={y} width={1000} />
+    </Group>
+  );
+}
+
 /** Red pip with chevron just outside the ring end that now lies beyond (C-Indicators). */
 export function pipCenter(l: Layout, later: boolean) {
-  return polar(l, D.pipR, later ? D.pipAngleLater : D.pipAngleEarlier);
+  return polar(l, l.dial.pipR, later ? l.dial.pipAngleLater : l.dial.pipAngleEarlier);
 }
 
 function NowPip({ l, later }: { l: Layout; later: boolean }) {
-  // θ 12° (toward the top end) when now is later... the top end holds earlier values, so a later
-  // "now" sits beyond the bottom-left end. Spec: θ 72° if earlier, θ 12° if later.
+  // "Now" marker: a target glyph (outer ring + inner solid dot). Reads as a current-position
+  // indicator, more intuitive than the previous chevron-into-dot which looked like a plain arrow.
   const c = pipCenter(l, later);
-  const chevron = Skia.Path.Make();
-  // Chevron points away from the ring along the radial direction.
-  const out = polar(l, D.pipR + 13, later ? D.pipAngleLater : D.pipAngleEarlier);
-  const nx = out.x - c.x;
-  const ny = out.y - c.y;
-  const len = Math.hypot(nx, ny) || 1;
-  const ux = nx / len;
-  const uy = ny / len;
-  const tip = { x: c.x + ux * 14, y: c.y + uy * 14 };
-  chevron.moveTo(tip.x - ux * 7 - uy * 7, tip.y - uy * 7 + ux * 7);
-  chevron.lineTo(tip.x, tip.y);
-  chevron.lineTo(tip.x - ux * 7 + uy * 7, tip.y - uy * 7 - ux * 7);
+  const outerR = l.dial.pip * 0.9;
+  const innerR = l.dial.pip * 0.32;
   return (
     <Group>
-      <Path path={chevron} style="stroke" strokeWidth={2.5} strokeCap="round" strokeJoin="round" color={color.now} />
-      <Circle cx={c.x} cy={c.y} r={D.pip / 2} color={color.now} />
-      <Circle cx={c.x} cy={c.y} r={D.pip / 2} style="stroke" strokeWidth={1.5} color={color.bg} />
+      <Circle cx={c.x} cy={c.y} r={outerR} style="stroke" strokeWidth={2.5} color={color.now} />
+      <Circle cx={c.x} cy={c.y} r={innerR} color={color.now} />
     </Group>
   );
 }

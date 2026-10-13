@@ -242,7 +242,7 @@ export function AppModelProvider({ platform, children }: { platform: PlatformSer
 
   const zone = useMemo(() => {
     const name = place ? zoneForLocation(place.latitude, place.longitude) : 'UTC';
-    return new LocalZone(name, (z, ms) => platform.tzOffsetMinutes(z, ms));
+    return LocalZone(name, (z, ms) => platform.tzOffsetMinutes(z, ms));
   }, [place, platform]);
 
   // Clock.
@@ -254,7 +254,7 @@ export function AppModelProvider({ platform, children }: { platform: PlatformSer
 
   const [selection, setSelection] = useState<Selection>(() => (init?.pinned ? pin(init.pinned) : LIVE));
   const selected = selectedInstant(selection, now);
-  const hapticGate = useRef(new HapticGate(settings.haptics)).current;
+  const hapticGate = useRef(HapticGate(settings.haptics)).current;
   useEffect(() => hapticGate.setEnabled(settings.haptics), [settings.haptics, hapticGate]);
   const haptic = useCallback(
     (kind: HapticKind) => {

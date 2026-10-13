@@ -24,7 +24,7 @@ import {
 import { LocalZone, intlOffsetProvider, zoneForLocation } from '../src/core/timezone';
 import { MOCK_NOW_MS } from '../src/core/constants';
 
-const LA = new LocalZone('America/Los_Angeles', intlOffsetProvider);
+const LA = LocalZone('America/Los_Angeles', intlOffsetProvider);
 
 describe('offline time zone lookup', () => {
   it.each([
@@ -42,7 +42,7 @@ describe('offline time zone lookup', () => {
   it('offset comes from the zone database for the selected date (DST differs)', () => {
     expect(LA.offsetMinutes(Date.UTC(2026, 9, 12, 12))).toBe(-420);
     expect(LA.offsetMinutes(Date.UTC(2026, 11, 21, 12))).toBe(-480);
-    const phx = new LocalZone('America/Phoenix', intlOffsetProvider);
+    const phx = LocalZone('America/Phoenix', intlOffsetProvider);
     expect(phx.offsetMinutes(Date.UTC(2026, 6, 1))).toBe(-420);
     expect(phx.offsetMinutes(Date.UTC(2026, 0, 1))).toBe(-420);
   });
@@ -127,14 +127,14 @@ describe('calibration persistence', () => {
 
 describe('haptic rate limits and re-arm', () => {
   it('light ticks are capped at 30 per second', () => {
-    const g = new HapticGate();
+    const g = HapticGate();
     let fired = 0;
     for (let i = 0; i < 100; i++) if (g.light(i * 5)) fired++; // 100 ticks in 0.5 s
     expect(fired).toBe(30);
     expect(g.light(1000)).toBe(true); // window slides
   });
   it('center bump fires on entry, at most once per 3 s, and re-arms after leaving', () => {
-    const g = new HapticGate();
+    const g = HapticGate();
     expect(g.center(0, true)).toBe(true);
     expect(g.center(100, true)).toBe(false); // still inside: no re-fire
     expect(g.center(200, false)).toBe(false);
@@ -143,7 +143,7 @@ describe('haptic rate limits and re-arm', () => {
     expect(g.center(3500, true)).toBe(true);
   });
   it('compass warning fires once per episode; recovery gives success and re-arms', () => {
-    const g = new HapticGate();
+    const g = HapticGate();
     expect(g.warning()).toBe(true);
     expect(g.warning()).toBe(false);
     expect(g.recover()).toBe(true);
@@ -151,7 +151,7 @@ describe('haptic rate limits and re-arm', () => {
     expect(g.warning()).toBe(true);
   });
   it('everything is silent when haptics are off', () => {
-    const g = new HapticGate(false);
+    const g = HapticGate(false);
     expect(g.light(0)).toBe(false);
     expect(g.medium()).toBe(false);
     expect(g.success()).toBe(false);

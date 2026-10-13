@@ -40,20 +40,34 @@ export const intlOffsetProvider: OffsetProvider = (zone, ms) => {
   return Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60000);
 };
 
-/** A zone bound to an offset provider. All "local" values are wall-clock in that zone. */
-export class LocalZone {
-  constructor(
-    readonly zone: string,
-    private readonly offsetOf: OffsetProvider,
-  ) {}
+/**
+ * A zone bound to an offset provider. All "local" values are wall-clock in that zone.
+ *
+ * Deliberately a plain object, not a class. Reanimated Worklets refuses to copy class
+ * instances across the JS→UI thread boundary; a worklet that transitively closes over
+ * anything containing a `LocalZone` would otherwise throw `Cannot copy value of type LocalZone`.
+ */
+export type LocalZone = {
+  readonly zone: string;
+  offsetMinutes(ms: number): number;
+  fields(ms: number): {
+    year: number;
+    month: number;
+    day: number;
+    hour: number;
+    minute: number;
+    second: number;
+    minuteOfDay: number;
+  };
+  instant(year: number, month: number, day: number, hour?: number, minute?: number): number;
+  startOfDay(ms: number): number;
+  endOfDay(ms: number): number;
+};
 
-  offsetMinutes(ms: number): number {
-    return this.offsetOf(this.zone, ms);
-  }
-
-  /** Wall-clock fields at an instant. */
-  fields(ms: number) {
-    const d = new Date(ms + this.offsetMinutes(ms) * 60000);
+export function LocalZone(zone: string, offsetOf: OffsetProvider): LocalZone {
+  const offsetMinutes = (ms: number) => offsetOf(zone, ms);
+  const fields = (ms: number) => {
+    const d = new Date(ms + offsetMinutes(ms) * 60000);
     return {
       year: d.getUTCFullYear(),
       month: d.getUTCMonth() + 1,
@@ -63,33 +77,26 @@ export class LocalZone {
       second: d.getUTCSeconds(),
       minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
     };
-  }
-
-  /**
-   * Instant for a wall-clock time. In a spring-forward gap the later offset is used;
-   * in a fall-back overlap the earlier instant is returned.
-   */
-  instant(year: number, month: number, day: number, hour = 0, minute = 0): number {
+  };
+  const instant = (year: number, month: number, day: number, hour = 0, minute = 0) => {
+    // In a spring-forward gap the later offset is used; in a fall-back overlap the earlier instant.
     const naive = Date.UTC(year, month - 1, day, hour, minute);
-    const a = naive - this.offsetMinutes(naive - 14 * 3600000) * 60000;
-    const b = naive - this.offsetMinutes(naive + 14 * 3600000) * 60000;
-    const ok = (ms: number) => ms + this.offsetMinutes(ms) * 60000 === naive;
+    const a = naive - offsetMinutes(naive - 14 * 3600000) * 60000;
+    const b = naive - offsetMinutes(naive + 14 * 3600000) * 60000;
+    const ok = (ms: number) => ms + offsetMinutes(ms) * 60000 === naive;
     if (ok(a) && ok(b)) return Math.min(a, b);
     if (ok(a)) return a;
     if (ok(b)) return b;
-    return naive - this.offsetMinutes(naive) * 60000;
-  }
-
-  /** Start of the local day containing ms. */
-  startOfDay(ms: number): number {
-    const f = this.fields(ms);
-    return this.instant(f.year, f.month, f.day);
-  }
-
-  /** Start of the next local day after the one containing ms. */
-  endOfDay(ms: number): number {
-    const f = this.fields(ms);
+    return naive - offsetMinutes(naive) * 60000;
+  };
+  const startOfDay = (ms: number) => {
+    const f = fields(ms);
+    return instant(f.year, f.month, f.day);
+  };
+  const endOfDay = (ms: number) => {
+    const f = fields(ms);
     const next = new Date(Date.UTC(f.year, f.month - 1, f.day + 1));
-    return this.instant(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate());
-  }
+    return instant(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate());
+  };
+  return { zone, offsetMinutes, fields, instant, startOfDay, endOfDay };
 }

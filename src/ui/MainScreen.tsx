@@ -10,6 +10,7 @@ import {
   useAnimatedReaction,
   useSharedValue,
   withDecay,
+  withSpring,
   withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -73,7 +74,7 @@ export function MainScreen() {
       height,
       dialX: layout.ax,
       dialY: layout.ay,
-      dialR: size.dial.notch[1],
+      dialR: layout.dial.notch[1],
       top: insets.top,
       bottom: insets.bottom,
       left: insets.left,
@@ -87,6 +88,13 @@ export function MainScreen() {
   const mode = useSharedValue<'none' | 'sky' | Ring | 'calib'>('none');
   const start = useSharedValue({ x: 0, y: 0, theta: 0, t: 0 });
   const dragAngle = useSharedValue(0);
+  // Pool anchors for each ring. Set at gesture start (beginScrub) and after a gesture settles
+  // (useEffect below). Dial labels are positioned entirely from these anchors + the UI-thread
+  // dragAngle, so step crossings don't jolt labels (they used to depend on React `selected`,
+  // which lags the UI thread by one render).
+  const [scrubBaseTime, setScrubBaseTime] = useState(app.selected);
+  const [scrubBaseDay, setScrubBaseDay] = useState(() => zone.fields(app.selected).day);
+  const [scrubBaseMonth, setScrubBaseMonth] = useState(() => zone.fields(app.selected).month);
   const [activeRing, setActiveRing] = useState<Ring | null>(null);
   const [moving, setMoving] = useState(false);
   const calibrating = useSharedValue(false);
@@ -120,7 +128,53 @@ export function MainScreen() {
   const beginScrub = useCallback(() => {
     scrubBase.current = app.selected;
     lastApplied.current = 0;
-  }, [app.selected]);
+    // Snapshot each ring's pool anchor to the current committed selection. The anchors stay
+    // constant for the duration of the gesture so every label's base angle is a render-time
+    // constant — the per-label position worklets just read the drag SharedValue and polar() it.
+    const f = zone.fields(app.selected);
+    setScrubBaseTime(app.selected);
+    setScrubBaseDay(f.day);
+    setScrubBaseMonth(f.month);
+  }, [app.selected, zone]);
+
+  // Programmatic animation used by the "now" button. Simulates a time-ring drag whose dragAngle
+  // tweens from 0 to the angle that would bring `app.now` to the notch, so the user sees the
+  // wheel scroll into position rather than snap. At the end, flips the selection back to LIVE.
+  const animateToNow = useCallback(() => {
+    if (selection.live) return;
+    const deltaMin = (app.now - app.selected) / 60000;
+    if (Math.abs(deltaMin) < 1) {
+      app.backToNow();
+      return;
+    }
+    scrubBase.current = app.selected;
+    lastApplied.current = 0;
+    const f = zone.fields(app.selected);
+    setScrubBaseTime(app.selected);
+    setScrubBaseDay(f.day);
+    setScrubBaseMonth(f.month);
+    setActiveRing('time');
+    mode.value = 'time';
+    dragAngle.value = 0;
+    const targetDrag = -deltaMin * DIAL_DEG_PER_MINUTE;
+    dragAngle.value = withTiming(targetDrag, { duration: 450 }, () => {
+      dragAngle.value = 0;
+      mode.value = 'none';
+      runOnJS(setActiveRing)(null);
+      runOnJS(app.backToNow)();
+    });
+  }, [app, dragAngle, mode, selection.live, zone]);
+
+  // Between gestures, keep the pool anchors in sync with `selected` (e.g., after a "back to now"
+  // tap, or when the gesture ends and the committed selected has drifted from the anchor).
+  // Skipping while a ring is active prevents mid-drag pool regenerations.
+  useEffect(() => {
+    if (activeRing) return;
+    const f = zone.fields(app.selected);
+    setScrubBaseTime(app.selected);
+    setScrubBaseDay(f.day);
+    setScrubBaseMonth(f.month);
+  }, [app.selected, activeRing, zone]);
 
   const applyRing = useCallback(
     (ring: Ring, steps: number) => {
@@ -153,7 +207,10 @@ export function MainScreen() {
     [app, platform],
   );
 
-  // Ring snap: the wheel offset settles at whole values.
+  // Ring snap: fires `applyRing` on each whole-step crossing. `applyRing` updates the committed
+  // `selected` (slow, React), but label positions in the Dial are driven purely by
+  // `dragAngle` + `scrubBase*` anchors (fast, UI thread), so visuals are decoupled from the
+  // React update cadence.
   useAnimatedReaction(
     () => (mode.value === 'time' || mode.value === 'day' || mode.value === 'month' ? Math.round(-dragAngle.value / RING_SPACING[mode.value]) : null),
     (steps, prev) => {
@@ -255,8 +312,11 @@ export function MainScreen() {
         const omega = ((e.velocityX * -layout.dir * 0.7 + e.velocityY * 0.7) / r) * (180 / Math.PI);
         runOnJS(setMoving)(true);
         dragAngle.value = withDecay({ velocity: omega, deceleration: 0.998 }, () => {
+          // Spring snap gives the physical "stickiness" of an iOS/Google picker; linear timing
+          // read as mechanical. On the last snap, zero both dragAngle and appliedSteps so the
+          // next drag starts cleanly from subDrag = 0.
           const snapped = Math.round(dragAngle.value / spacing) * spacing;
-          dragAngle.value = withTiming(snapped, { duration: motion.reduceMotion.linearMs }, () => {
+          dragAngle.value = withSpring(snapped, { damping: 18, stiffness: 220, mass: 0.6, overshootClamping: false }, () => {
             mode.value = 'none';
             dragAngle.value = 0;
             runOnJS(setMoving)(false);
@@ -478,6 +538,9 @@ export function MainScreen() {
         blueSpans={day?.blueSpans ?? []}
         active={activeRing}
         drag={dragAngle}
+        scrubBaseTime={scrubBaseTime}
+        scrubBaseDay={scrubBaseDay}
+        scrubBaseMonth={scrubBaseMonth}
         moving={moving}
         disabled={!dialEnabled}
         increasedContrast={false}
@@ -511,7 +574,7 @@ export function MainScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={nowLabel}
-          onPress={() => app.backToNow()}
+          onPress={animateToNow}
           style={
             timeInRange
               ? (() => {
