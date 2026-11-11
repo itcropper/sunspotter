@@ -26,13 +26,18 @@ final class SunCameraView: ExpoView {
     previewLayer.frame = bounds
     if let conn = previewLayer.connection, let scene = window?.windowScene {
       let angle: CGFloat
+      let legacy: AVCaptureVideoOrientation
       switch scene.interfaceOrientation {
-      case .landscapeLeft: angle = 180
-      case .landscapeRight: angle = 0
-      case .portraitUpsideDown: angle = 270
-      default: angle = 90
+      case .landscapeLeft: angle = 180; legacy = .landscapeLeft
+      case .landscapeRight: angle = 0; legacy = .landscapeRight
+      case .portraitUpsideDown: angle = 270; legacy = .portraitUpsideDown
+      default: angle = 90; legacy = .portrait
       }
-      if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
+      if #available(iOS 17.0, *) {
+        if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
+      } else if conn.isVideoOrientationSupported {
+        conn.videoOrientation = legacy
+      }
     }
   }
 

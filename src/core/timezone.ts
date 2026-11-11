@@ -64,6 +64,7 @@ export type LocalZone = {
   endOfDay(ms: number): number;
 };
 
+// eslint-disable-next-line @typescript-eslint/no-redeclare -- factory shares its type's name (worklet-safe replacement for a class)
 export function LocalZone(zone: string, offsetOf: OffsetProvider): LocalZone {
   const offsetMinutes = (ms: number) => offsetOf(zone, ms);
   const fields = (ms: number) => {

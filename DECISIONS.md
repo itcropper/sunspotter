@@ -35,4 +35,15 @@ Test tolerance: event times ±60 s, azimuth/altitude ±0.05° vs NOAA; design ta
 - **Haptics**: native module maps exactly to the Spec-Interactions table (expo-haptics' Android mapping doesn't use `HapticFeedbackConstants`).
 - **Storage**: tiny native key-value store (UserDefaults / SharedPreferences) — synchronous reads at startup, no extra dependency.
 - **Camera**: own native preview views (AVCaptureVideoPreviewLayer / CameraX PreviewView, aspect fill) that report buffer size and focal length in buffer pixels. Intrinsics in points are computed in TS (`screenIntrinsics`, unit tested). Android prefers `LENS_INTRINSIC_CALIBRATION`, then focal length / sensor size. Wide: zoom ratio 0.5 (ultra-wide) when supported, else the 1× preview at 50% in the center with the projection scaled 0.5.
-- **iOS**: no Mac is available in this environment. The Swift code is written but **not compiled**; iOS build, launch, screenshots and cold start are not done.
+- **iOS** (2026-11-11, Xcode 26.6, iPhone 17 Simulator, iOS 26): Debug and Release simulator builds compile and launch. One fix was needed: `AVCaptureConnection.videoRotationAngle` is iOS 17+, so iOS 16.4 falls back to `videoOrientation`. A signed device archive has **not** been made yet, because the Apple ID in Xcode needs to sign in again ("No Accounts").
+- **Skia text opacity**: `Paragraph` ignores a parent `Group`'s opacity. Before the fix, hidden labels drew at y = 0 (a stray hour numeral at the top-left and the hidden sunset edge-tab time at the top-right), and the compass dim left numerals at full brightness. Hidden text now moves off-screen, and the whole-overlay dim uses a layer paint. Dial labels in the 4° fade band at the wedge edges still draw at full opacity (a saveLayer per label costs too much).
+
+## iOS Simulator screenshots (simulator mode, `scripts/ios-sim-scene.sh`)
+Taken for `Main`, `S02-OffScreen`, `S04-Future`, `S06-Wide`, `S07b-Calibrated`, `S08-Compass` and `Settings`. Visible chrome differences that follow from earlier decisions:
+- Main/S08: hour 6 and the "6:33" sunset label show (no terrain, so no visible-sunset marker to collide with).
+- The dial has no big center readouts or notch triangle (removed in the dial rework; the wheel label at the notch is the readout).
+- `S10-iOS-Land` is **not taken**. Rotating the Simulator needs a keystroke (⌘→), and this session has no accessibility access to send one. The `landscape` scene only rolls the simulated attitude.
+A full side-by-side comparison against each artboard is still to do.
+
+## Cold start (proxy)
+iOS Simulator, Release build, iPhone 17, Apple-silicon Mac: from `simctl launch` to the JS `Running "main"` log line, 5 runs: 268, 219, 219, 219, 207 ms (median 219 ms). This excludes the first Skia frame, and the Simulator runs much faster than a phone. Real-device timing is in `FIELD_TEST.md`. Android emulator: not measured (no Android SDK on this Mac).

@@ -30,6 +30,9 @@ import { alpha, color, motion, size, stroke, type, withAlpha } from '../theme/to
 import { computeFrame, type Frame, type PathModel, type Screen, STYLE_KEYS } from './overlayModel';
 import { makeLabel, type Label } from './text';
 
+// Skia Paragraph ignores a parent Group's opacity, so hidden text is also moved off-screen.
+const OFFSCREEN = -1e4;
+
 const STYLE_COLOR: string[] = STYLE_KEYS.map((k) =>
   k === 'nightAm' ? withAlpha(color.am, alpha.nightPath)
   : k === 'nightPm' ? withAlpha(color.pm, alpha.nightPath)
@@ -194,10 +197,16 @@ export function Overlay(props: OverlayProps) {
     { translateY: finger.value.y - 56 },
   ]);
   const opacity = props.visible ? (props.dimmed ? alpha.compassDim : 1) : 0;
+  // A layer paint (not Group opacity) so the dim also reaches Paragraph text.
+  const rootLayer = useMemo(() => {
+    const p = Skia.Paint();
+    p.setAlphaf(opacity);
+    return p;
+  }, [opacity]);
 
   return (
     <Canvas style={{ position: 'absolute', left: 0, top: 0, width: screen.width, height: screen.height }} pointerEvents="none">
-      <Group opacity={opacity}>
+      <Group layer={rootLayer}>
         {/* Horizon (apparent altitude 0°) */}
         <Path path={horizonPath} style="stroke" strokeWidth={stroke.horizonCasing} color={withAlpha(color.bg, casingA)} />
         <Path path={horizonPath} style="stroke" strokeWidth={stroke.horizon} color={color.ui} />
@@ -253,7 +262,10 @@ export function Overlay(props: OverlayProps) {
 
 function HourLabel({ frame, index, label }: { frame: SharedValue<Frame>; index: number; label: Label }) {
   const x = useDerivedValue(() => (frame.value.hourLabels[index]?.x ?? 0) - label.width / 2);
-  const y = useDerivedValue(() => (frame.value.hourLabels[index]?.y ?? 0) - label.height / 2);
+  const y = useDerivedValue(() => {
+    const h = frame.value.hourLabels[index];
+    return h?.visible ? h.y - label.height / 2 : OFFSCREEN;
+  });
   const op = useDerivedValue(() => (frame.value.hourLabels[index]?.visible ? 1 : 0));
   return (
     <Group opacity={op}>
@@ -283,7 +295,7 @@ function EventMarker({ frame, which, label, casingA }: { frame: SharedValue<Fram
   }, [R, which]);
   const t = useDerivedValue(() => {
     const m = frame.value[which];
-    return [{ translateX: m.x }, { translateY: m.y }];
+    return [{ translateX: m.x }, { translateY: m.visible ? m.y : OFFSCREEN }];
   });
   const op = useDerivedValue(() => (frame.value[which].visible ? 1 : 0));
   const lx = label ? -label.width / 2 : 0;
@@ -349,7 +361,8 @@ function EdgeTab({ frame, screen, index, label }: { frame: SharedValue<Frame>; s
   const tr = useDerivedValue(() => {
     const t = frame.value.tabs[index];
     const x = t?.right ? screen.width - screen.right - T.edgePad : screen.left + T.edgePad;
-    return [{ translateX: x }, { translateY: t?.y ?? 0 }];
+    // Stay in place while fading out; off-screen once hidden (Paragraph ignores opacity).
+    return [{ translateX: x }, { translateY: t && (t.visible || op.value > 0.01) ? t.y : OFFSCREEN }];
   });
   const leftOp = useDerivedValue(() => (right.value ? 0 : 1));
   const rightOp = useDerivedValue(() => (right.value ? 1 : 0));

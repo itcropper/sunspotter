@@ -23,16 +23,13 @@ npx expo install --fix      # fix incompatible package versions
 
 Run lint and typecheck before declaring any task done.
 
-## Navigation & Routing
+## Project-specific overrides
 
-- Use **Expo Router** for all navigation. Routes live in `src/app/` — every file there is a screen, `_layout.tsx` files define navigators. Keep non-route code (components, hooks, utils) outside `src/app/`.
-- Import `Link`, `router`, and `useLocalSearchParams` from `expo-router`.
-- Docs: https://docs.expo.dev/router/introduction.md
+Read `CLAUDE.md` first; it wins over this file.
 
-## Building with EAS
-
-Use EAS to build, sign, and submit the app in the cloud (`eas build`, `eas submit`) and to ship over-the-air updates (`eas update`) — no local Xcode or Android Studio required. Run EAS CLI as `bunx eas-cli <command>` in Bun projects, or `npx eas-cli@latest <command>` otherwise; substitute that for bare `eas` in docs examples.
-Docs: https://docs.expo.dev/eas/index.md
+- **No Expo Router.** This is a single-screen app (`App.tsx` → `src/ui/MainScreen.tsx`); there is no `src/app/` and no navigation library.
+- **No EAS Update / OTA updates and no `expo-updates`.** The app must make no network calls of any kind (release Android has no INTERNET permission). Builds are made locally with Xcode and Gradle (see `CLAUDE.md` › Commands).
+- Every new dependency must be listed in `DEPENDENCIES.md` with a no-network note (a test enforces this).
 
 ## Rules
 

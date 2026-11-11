@@ -27,6 +27,7 @@ export type HapticGate = {
   recover(): boolean;
 };
 
+// eslint-disable-next-line @typescript-eslint/no-redeclare -- factory shares its type's name (worklet-safe replacement for a class)
 export function HapticGate(enabled = true): HapticGate {
   let on = enabled;
   const lightTimes: number[] = [];

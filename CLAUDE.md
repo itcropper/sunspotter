@@ -35,7 +35,14 @@ Log conflicts and judgment calls in `DECISIONS.md`.
 - `src/native/platform.ts` interface; `device.tsx` real; `src/sim/simulator.tsx` debug-only simulator (required behind `if (__DEV__)`).
 - `src/ui/` Skia overlay + dial (UI-thread re-projection via Reanimated shared values), RN chrome.
 
-## Commands (Windows toolchain, run from WSL via cmd.exe)
+## Commands (macOS: Xcode 26, CocoaPods, Node 20)
 - `npm run typecheck`, `npm run lint`, `npm test`, `npm run check`
-- Android: `scripts/android.sh debug|release`; simulator scenes: `scripts/sim-scene.sh <scene>`
-- iOS needs a Mac (not available in this environment).
+- iOS: `npx expo prebuild -p ios --clean`, then `xcodebuild -workspace ios/SunSpotter.xcworkspace -scheme SunSpotter -configuration Debug|Release -sdk iphonesimulator -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build`. Simulator scenes (Metro on 8081): `scripts/ios-sim-scene.sh <scene> [shot.png]`.
+- iOS store build: `xcodebuild ... -destination 'generic/platform=iOS' -allowProvisioningUpdates DEVELOPMENT_TEAM=845SD4VFJN archive` (needs the Apple ID signed in under Xcode › Settings › Accounts).
+- Android: `npx expo prebuild -p android --clean`, `cd android && ./gradlew assembleDebug|assembleRelease`, then `scripts/check-release.sh`. Scenes: `scripts/sim-scene.sh <scene>`. No Android SDK is installed on this Mac yet.
+- `AGENTS.md` is Expo's generic template, trimmed. Where it and this file disagree, this file wins (no Expo Router, no EAS Update).
+
+## Gotchas
+- Skia `Paragraph` ignores a parent `Group`'s `opacity`. Hide text by moving it off-screen, or use `layer={paint}` (see `Overlay.tsx`).
+- Worklets can't copy class instances: use plain-object factories (`LocalZone`, `HapticGate`).
+- Swift in `modules/sun-sensors/ios` must build for iOS 16.4 (deployment target): guard newer APIs with `#available`.
