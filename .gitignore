@@ -47,3 +47,6 @@ modules/*/android/.cxx/
 # lint/test output
 coverage/
 lint.json
+
+# local store builds
+/build/

@@ -34,7 +34,7 @@ import { DIAL_DEG_PER_DAY, DIAL_DEG_PER_MINUTE, DIAL_DEG_PER_MONTH, DIAL_NOW_TIC
 import { formatClock } from '../core/format';
 import { daysInMonth } from '../core/selection';
 import type { LocalZone } from '../core/timezone';
-import { alpha, color, size, stroke, type, withAlpha } from '../theme/tokens';
+import { alpha, color, stroke, type, withAlpha } from '../theme/tokens';
 import type { Layout, Ring } from './geometry';
 import { polar } from './geometry';
 import { makeLabel, type Label } from './text';
@@ -446,6 +446,8 @@ function RingLabel({
   const halfH = label.height / 2;
   const x = useDerivedValue(() => {
     const angle = baseAngle + drag.value;
+    // Skia Paragraph ignores Group opacity: park fully hidden labels off-screen.
+    if (hideAtNotch || angle < WEDGE_MIN - WEDGE_FADE || angle > WEDGE_MAX + WEDGE_FADE) return -1e4;
     return polar(l, radius, angle).x - halfW;
   });
   const y = useDerivedValue(() => {
