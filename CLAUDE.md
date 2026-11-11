@@ -38,7 +38,7 @@ Log conflicts and judgment calls in `DECISIONS.md`.
 ## Commands (macOS: Xcode 26, CocoaPods, Node 20)
 - `npm run typecheck`, `npm run lint`, `npm test`, `npm run check`
 - iOS: `npx expo prebuild -p ios --clean`, then `xcodebuild -workspace ios/SunSpotter.xcworkspace -scheme SunSpotter -configuration Debug|Release -sdk iphonesimulator -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build`. Simulator scenes (Metro on 8081): `scripts/ios-sim-scene.sh <scene> [shot.png]`.
-- iOS store build: `xcodebuild ... -destination 'generic/platform=iOS' -allowProvisioningUpdates DEVELOPMENT_TEAM=845SD4VFJN archive` (needs the Apple ID signed in under Xcode › Settings › Accounts).
+- iOS store build: `scripts/ios-testflight.sh` (archive + upload to TestFlight; needs the Apple ID signed in under Xcode › Settings › Accounts and an App Store Connect app record for `com.sunspotter.app`). Bundle ID must not contain the owner's name.
 - Android: `npx expo prebuild -p android --clean`, `cd android && ./gradlew assembleDebug|assembleRelease`, then `scripts/check-release.sh`. Scenes: `scripts/sim-scene.sh <scene>`. No Android SDK is installed on this Mac yet.
 - `AGENTS.md` is Expo's generic template, trimmed. Where it and this file disagree, this file wins (no Expo Router, no EAS Update).
 
